@@ -148,6 +148,9 @@ class DictReader:
                 parameters.append(None)
             elif ptype == 'blobParameter':
                 parameters.append(eval('b' + value))
+            elif ptype == 'stringParamter':  # Yes, parameter is misspelled
+                s = eval('b' + value).decode()
+                parameters.append(s)
             else:
                 parameters.append(eval(value))
 
