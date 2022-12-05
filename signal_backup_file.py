@@ -1,3 +1,4 @@
+import collections
 import hashlib
 import hmac
 import io
@@ -193,3 +194,112 @@ class DictReader:
             else:
                 click.secho(f'Unmatched frame type {frame}', fg='red')
                 exit(1)
+
+
+# Base Types as defined here:
+# https://github.com/signalapp/Signal-Android/blob/ec1f771364633b5156e198ba6ff780b68307746b/
+#     app/src/main/java/org/thoughtcrime/securesms/database/MmsSmsColumns.java#L66-L94
+MESSAGE_TYPES = [
+    # 0-5
+    '', 'incoming audio call', 'outgoing audio call', 'missed audio call', 'joined', 'unsupported message',
+    # 6-10
+    'invalid message', 'profile change', 'missed video call', 'gv1 migration', 'incoming video call',
+    # 11-15
+    'outgoing video call', 'group call', 'bad decrypt', 'change number', 'boost request',
+    # 16-20
+    'thread merge', 'sms export', '', '', 'inbox',
+    # 21-25
+    'outbox', 'sending', 'sent', 'sent failed', 'pending secure sms fallback',
+    # 26-27
+    'pending insecure sms fallback', 'draft type']
+MESSAGE_TYPE_MASK = 0x1F
+
+
+class ThreadReader:
+    def __init__(self, filename, password):
+        self.recipients = {}
+        thread_mapping = {}
+        self.threads = collections.defaultdict(list)
+        attachments = {}
+        messages_by_id = {}
+        groups = []
+        reactions = []
+
+        for table, entry in DictReader(filename, password):
+            if table == 'recipient':
+                if 'group_id' in entry:
+                    continue
+                for key in ['system_display_name', 'profile_joined_name', 'signal_profile_name']:
+                    if entry.get(key):
+                        name = entry[key]
+                        break
+                else:
+                    # No name found, ignore
+                    continue
+                self.recipients[entry['_id']] = {'name': name, 'phone': entry.get('phone', '')}
+            elif table == 'groups':
+                groups.append(entry)
+            elif table == 'thread':
+                thread_mapping[entry['_id']] = entry['thread_recipient_id']
+            elif table in ['sms', 'mms']:
+                msg = {'date': entry['date'], 'address': entry['address']}
+                if 'body' in entry:
+                    msg['body'] = entry['body']
+                elif 'type' in entry:
+                    base_type = entry['type'] & MESSAGE_TYPE_MASK
+                    msg['type'] = MESSAGE_TYPES[base_type]
+
+                recipient_id = thread_mapping[entry['thread_id']]
+                self.threads[recipient_id].append(msg)
+                messages_by_id[entry['_id']] = msg
+            elif table == 'part':
+                attachments[entry['_id']] = {'type': entry['ct'],
+                                             'unique_id': entry['unique_id'],
+                                             'mid': entry['mid']
+                                             }
+            elif table == 'attachment':
+                if entry['rowId'] not in attachments:
+                    continue
+                attachments[entry['rowId']]['data'] = entry['data']
+                assert attachments[entry['rowId']]['unique_id'] == entry['attachmentId']
+            elif table == 'reaction':
+                reaction = {
+                    'mid': entry['message_id'],
+                    'emoji': entry['emoji'],
+                    'date': entry['date_sent'],
+                    'aid': entry['author_id'],
+                }
+                reactions.append(reaction)
+
+        for entry in groups:
+            group = {'name': entry['title'], 'members': []}
+            for member in entry['members'].split(','):
+                mid = int(member)
+                group['members'].append(dict(self.recipients[mid]))
+            self.recipients[entry['recipient_id']] = group
+
+        for thread in self.threads.values():
+            for msg in thread:
+                address = msg.pop('address')
+                msg['author'] = self.recipients[address]
+
+        for attachment in attachments.values():
+            mid = attachment.pop('mid')
+            msg = messages_by_id[mid]
+            if 'attachments' not in msg:
+                msg['attachments'] = []
+            msg['attachments'].append(attachment)
+
+        for reaction in reactions:
+            aid = reaction.pop('aid')
+            reaction['author'] = self.recipients[aid]
+
+            mid = reaction.pop('mid')
+            msg = messages_by_id[mid]
+            if 'reactions' not in msg:
+                msg['reactions'] = []
+            msg['reactions'].append(reaction)
+
+    def __iter__(self):
+        for recipient_id in self.threads:
+            yield self.recipients[recipient_id], self.threads[recipient_id]
