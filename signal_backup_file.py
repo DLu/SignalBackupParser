@@ -242,10 +242,15 @@ class ThreadReader:
             elif table == 'thread':
                 thread_mapping[entry['_id']] = entry['thread_recipient_id']
             elif table in ['sms', 'mms']:
-                msg = {'date': entry['date'], 'address': entry['address']}
+                msg = {'date': entry['date']}
+                if entry.get('server_guid') is None:
+                    msg['address'] = 1
+                else:
+                    msg['address'] = entry['address']
                 if 'body' in entry:
                     msg['body'] = entry['body']
-                elif 'type' in entry:
+
+                if 'type' in entry:
                     base_type = entry['type'] & MESSAGE_TYPE_MASK
                     msg['type'] = MESSAGE_TYPES[base_type]
 
@@ -272,7 +277,7 @@ class ThreadReader:
                 reactions.append(reaction)
 
         for entry in groups:
-            group = {'name': entry['title'], 'members': []}
+            group = {'name': entry['title'], 'members': [], 'group_id': entry['group_id']}
             for member in entry['members'].split(','):
                 mid = int(member)
                 group['members'].append(dict(self.recipients[mid]))
