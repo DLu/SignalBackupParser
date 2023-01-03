@@ -6,6 +6,7 @@ import os
 import re
 
 from Backups_pb2 import BackupFrame
+from Reactions_pb2 import ReactionList
 
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA512
@@ -257,6 +258,18 @@ class ThreadReader:
                 recipient_id = thread_mapping[entry['thread_id']]
                 self.threads[recipient_id].append(msg)
                 messages_by_id[entry['_id']] = msg
+
+                if 'reactions' in entry:
+                    r = ReactionList()
+                    r.ParseFromString(entry['reactions'])
+                    for a in r.reactions:
+                        reaction = {
+                            'mid': entry['_id'],
+                            'emoji': a.emoji,
+                            'date': a.sentTime,
+                            'aid': a.author,
+                        }
+                        reactions.append(reaction)
             elif table == 'part':
                 attachments[entry['_id']] = {'type': entry['ct'],
                                              'unique_id': entry['unique_id'],

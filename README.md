@@ -3,8 +3,7 @@ A Python library for reading Signal backup files.
 
 ## Setup
 1. Install the protobuf compiler with `sudo apt install protobuf-compiler`
-1. Download the latest [`Backups.proto`](https://github.com/signalapp/Signal-Android/blob/master/app/src/main/proto/Backups.proto) and save in this folder.
-1. Run `protoc --python_out=. Backups.proto` which should generate `Backups_pb2.py`
+1. Run `bash generate_protobuffers.bash` to generate `Backups_pb2.py` and `Reactions_pb2.py`
 1. `sudo pip3 install -r requirements.txt`
 
 ## Usage
