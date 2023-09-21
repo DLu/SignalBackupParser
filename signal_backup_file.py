@@ -106,19 +106,47 @@ class FrameReader:
                 last_bytes = self.bytes_read
 
 
+def split_into_fields(s):
+    if '(' not in s:
+        return s.split(',')
+    tokens = []
+    i = 0
+    while i < len(s):
+        if ',' not in s[i:]:
+            tokens.append(s[i:])
+            break
+        a = s.index(',', i)
+        if '(' in s[i:]:
+            b = s.index('(', i)
+        else:
+            b = len(s)
+        if a < b:
+            tokens.append(s[i: a])
+            i = a + 1
+        else:
+            c = s.index(')', b)
+            if ',' in s[c:]:
+                a = s.index(',', c)
+            else:
+                a = len(s)
+            tokens.append(s[i: a])
+            i = a + 1
+    return tokens
+
+
 class DictReader:
     def __init__(self, filename, password):
         self.frame_reader = FrameReader(filename, password)
         self.datatypes = {}
 
     def _get_table_definition(self, statement):
-        create_pattern = re.compile(r'CREATE TABLE "?(\w+)"?\s*\((.*)\)', re.DOTALL)
+        create_pattern = re.compile(r'^CREATE TABLE "?(\w+)"?\s*\((.*)\)$', re.DOTALL)
         m = create_pattern.match(statement)
         if not m:
             click.secho(f'Bad table definition {statement}', fg='yellow')
             return None, None
         fields = []
-        for field in m.group(2).split(','):
+        for field in split_into_fields(m.group(2)):
             parts = field.strip().split()
             name = parts.pop(0)
             if not parts:
@@ -151,7 +179,10 @@ class DictReader:
             elif ptype == 'blobParameter':
                 parameters.append(eval('b' + value))
             elif ptype == 'stringParamter':  # Yes, parameter is misspelled
-                s = eval('b' + value).decode()
+                try:
+                    s = eval('b' + value).decode()
+                except SyntaxError:
+                    s = value
                 parameters.append(s)
             else:
                 parameters.append(eval(value))
@@ -159,6 +190,7 @@ class DictReader:
         return table, parameters
 
     def __iter__(self):
+        version = None
         for frame, att in self.frame_reader:
             if frame.statement.statement:
                 statement = frame.statement.statement
@@ -178,6 +210,10 @@ class DictReader:
                 elif 'INSERT INTO ' in statement:
                     table, parameters = self._get_insertion(frame)
                     entry = {}
+
+                    if version == 167 and table == 'sms':
+                        del parameters[6]
+
                     for (name, dt), value in zip(self.datatypes[table], parameters):
                         if value is None:
                             continue
@@ -187,6 +223,7 @@ class DictReader:
                     click.secho(f'Unmatched statement {statement}', fg='yellow')
                     exit(1)
             elif frame.version.version:
+                version = frame.version.version
                 yield 'version', frame.version.version
             elif frame.attachment:
                 entry = {'attachmentId': frame.attachment.attachmentId, 'rowId': frame.attachment.rowId,
@@ -198,8 +235,8 @@ class DictReader:
 
 
 # Base Types as defined here:
-# https://github.com/signalapp/Signal-Android/blob/ec1f771364633b5156e198ba6ff780b68307746b/
-#     app/src/main/java/org/thoughtcrime/securesms/database/MmsSmsColumns.java#L66-L94
+# https://github.com/signalapp/Signal-Android/blob/6ccfab4087ba7a6f4d5ca9062ed56d3849d19efa/
+#     app/src/main/java/org/thoughtcrime/securesms/database/MessageTypes.java#L36
 MESSAGE_TYPES = [
     # 0-5
     '', 'incoming audio call', 'outgoing audio call', 'missed audio call', 'joined', 'unsupported message',
@@ -208,7 +245,7 @@ MESSAGE_TYPES = [
     # 11-15
     'outgoing video call', 'group call', 'bad decrypt', 'change number', 'boost request',
     # 16-20
-    'thread merge', 'sms export', '', '', 'inbox',
+    'thread merge', 'sms export', 'session_switchover', '', 'inbox',
     # 21-25
     'outbox', 'sending', 'sent', 'sent failed', 'pending secure sms fallback',
     # 26-27
@@ -224,7 +261,9 @@ class ThreadReader:
         attachments = {}
         messages_by_id = {}
         groups = []
+        group_membership = collections.defaultdict(set)
         reactions = []
+        orphan_threads = collections.defaultdict(list)
 
         for table, entry in DictReader(filename, password):
             if table == 'recipient':
@@ -241,23 +280,44 @@ class ThreadReader:
             elif table == 'groups':
                 groups.append(entry)
             elif table == 'thread':
-                thread_mapping[entry['_id']] = entry['thread_recipient_id']
-            elif table in ['sms', 'mms']:
-                msg = {'date': entry['date']}
-                if entry.get('server_guid') is None:
-                    msg['address'] = 1
+                for key in ['thread_recipient_id', 'recipient_ids', 'recipient_id']:
+                    if key in entry:
+                        thread_mapping[entry['_id']] = entry[key]
+
+            elif table in ['sms', 'mms', 'message']:
+                msg = {}
+                for date_key in ['date', 'date_sent']:
+                    if date_key in entry:
+                        msg['date'] = entry[date_key]
+                        break
                 else:
-                    msg['address'] = entry['address']
-                if 'body' in entry:
-                    msg['body'] = entry['body']
+                    raise RuntimeError('Cannot find date key. Available: ' + '/'.join(entry.keys()))
 
                 if 'type' in entry:
                     base_type = entry['type'] & MESSAGE_TYPE_MASK
                     msg['type'] = MESSAGE_TYPES[base_type]
 
-                recipient_id = thread_mapping[entry['thread_id']]
-                self.threads[recipient_id].append(msg)
+                if 'address' in entry:
+                    if entry.get('server_guid') is None:
+                        msg['address'] = 1
+                    else:
+                        msg['address'] = entry['address']
+                elif 'from_recipient_id' in entry:
+                    msg['address'] = entry['from_recipient_id']
+                elif msg['type'] in ['sent', 'outgoing video call']:
+                    msg['address'] = 1
+
+                if 'body' in entry:
+                    msg['body'] = entry['body']
+
                 messages_by_id[entry['_id']] = msg
+
+                thread_id = entry['thread_id']
+                if thread_id in thread_mapping:
+                    recipient_id = thread_mapping[thread_id]
+                    self.threads[recipient_id].append(msg)
+                else:
+                    orphan_threads[thread_id].append(msg)
 
                 if 'reactions' in entry:
                     r = ReactionList()
@@ -288,12 +348,26 @@ class ThreadReader:
                     'aid': entry['author_id'],
                 }
                 reactions.append(reaction)
+            elif table == 'group_membership':
+                group_membership[entry['group_id']].add(entry['recipient_id'])
+
+        for thread_id, msgs in orphan_threads.items():
+            if thread_id in thread_mapping:
+                recipient_id = thread_mapping[thread_id]
+                for msg in msgs:
+                    self.threads[recipient_id].append(msg)
+            else:
+                click.secho(f'Cannot find thread for thread_id {thread_id}. {len(msgs)} orphan messages.', fg='red')
 
         for entry in groups:
             group = {'name': entry['title'], 'members': [], 'group_id': entry['group_id']}
-            for member in entry['members'].split(','):
-                mid = int(member)
-                group['members'].append(dict(self.recipients[mid]))
+            if 'members' in entry:
+                for member in entry['members'].split(','):
+                    mid = int(member)
+                    group['members'].append(dict(self.recipients[mid]))
+            else:
+                for mid in group_membership[entry['group_id']]:
+                    group['members'].append(dict(self.recipients[mid]))
             self.recipients[entry['recipient_id']] = group
 
         for thread in self.threads.values():
