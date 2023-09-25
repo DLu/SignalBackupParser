@@ -27,6 +27,10 @@ class FrameReader:
         header_frame = self.read(header_length)
         frame = BackupFrame()
         frame.ParseFromString(header_frame)
+        if hasattr(frame.header, 'version'):
+            self.backup_version = frame.header.version
+        else:
+            self.backup_version = 0
 
         # Backup Key
         b_password = password.encode()
@@ -92,7 +96,12 @@ class FrameReader:
         with click.progressbar(length=self.bytes_total) as bar:
             while self.bytes_read < self.bytes_total:
                 # Read Frame
-                frame_length = int.from_bytes(self.read(4), byteorder='big')
+                frame_length_b = self.read(4)
+                if self.backup_version == 0:
+                    frame_length = int.from_bytes(frame_length_b, byteorder='big')
+                else:
+                    raise NotImplementedError('Frame length decryption')
+
                 frame = BackupFrame()
                 frame.ParseFromString(self.read_frame(frame_length - 10))
 
