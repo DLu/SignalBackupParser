@@ -27,6 +27,10 @@ class FrameReader:
         header_frame = self.read(header_length)
         frame = BackupFrame()
         frame.ParseFromString(header_frame)
+        if hasattr(frame.header, 'version'):
+            self.backup_version = frame.header.version
+        else:
+            self.backup_version = 0
 
         # Backup Key
         b_password = password.encode()
@@ -51,7 +55,7 @@ class FrameReader:
         self.bytes_read += length
         return self.file.read(length)
 
-    def read_frame(self, length, with_iv=False):
+    def read_frame(self, length, with_framelength_in_mac=-1, with_iv=False):
         val = int.to_bytes(self.counter, length=16, byteorder='little')
         self.iv[3] = val[0]
         self.iv[2] = val[1]
@@ -62,39 +66,66 @@ class FrameReader:
         enc_iv = self.iv
         if with_iv:
             mac.update(self.iv)
+
+        if with_framelength_in_mac != -1:
+            mac.update(with_framelength_in_mac)
+
         ofile = io.BytesIO()
 
-        def get_chunk():
-            # Read as many 16 byte chunks as possible
-            for i in range(int(length / 16)):
-                yield self.read(16)
-            # Read remainder
-            yield self.read(length % 16)
+        def get_chunk(max_length):
+            return self.read(max_length)
 
-        for enc_chunk in get_chunk():
+        enc_iv_idx = 0 if with_framelength_in_mac == -1 else len(with_framelength_in_mac)
+        bytesleft = length
+
+        while (bytesleft != 0):
+            enc_chunk = get_chunk(min(bytesleft, 16 - enc_iv_idx));
+            bytesleft -= len(enc_chunk)
+
             mac.update(enc_chunk)
             output = strxor.strxor(
                 enc_chunk,
-                self.aes_cipher.encrypt(enc_iv)[:len(enc_chunk)]
+                self.aes_cipher.encrypt(enc_iv)[enc_iv_idx:enc_iv_idx + len(enc_chunk)]
             )
+
             ctr = int.from_bytes(enc_iv, byteorder='big') + 1
             enc_iv = int.to_bytes(ctr, length=16, byteorder='big')
+            enc_iv_idx = 0
             ofile.write(output)
 
         our_mac = mac.digest()
         our_mac = our_mac[:10]  # trim to 1st 10 bytes
         their_asset_mac = self.read(10)
+
         assert hmac.compare_digest(our_mac, their_asset_mac)
         return ofile.getvalue()
+
+    def get_framelength(self, encryptedlength):
+        val = int.to_bytes(self.counter, length=16, byteorder='little')
+        self.iv[3] = val[0]
+        self.iv[2] = val[1]
+        self.iv[1] = val[2]
+        self.iv[0] = val[3]
+        enc_iv = self.iv
+        output = strxor.strxor(
+            encryptedlength,
+            self.aes_cipher.encrypt(enc_iv)[:len(encryptedlength)]
+        )
+        return output
 
     def __iter__(self):
         last_bytes = 0
         with click.progressbar(length=self.bytes_total) as bar:
             while self.bytes_read < self.bytes_total:
                 # Read Frame
-                frame_length = int.from_bytes(self.read(4), byteorder='big')
+                frame_length_b = self.read(4)
+                if self.backup_version == 0:
+                    frame_length = int.from_bytes(frame_length_b, byteorder='big')
+                else:
+                    frame_length = int.from_bytes(self.get_framelength(frame_length_b), byteorder='big')
+
                 frame = BackupFrame()
-                frame.ParseFromString(self.read_frame(frame_length - 10))
+                frame.ParseFromString(self.read_frame(frame_length - 10, (-1 if self.backup_version == 0 else frame_length_b), False))
 
                 # Read Attachment
                 attachment = None
