@@ -79,7 +79,7 @@ class FrameReader:
         bytesleft = length
 
         while (bytesleft != 0):
-            enc_chunk = get_chunk(min(bytesleft, 16 - enc_iv_idx));
+            enc_chunk = get_chunk(min(bytesleft, 16 - enc_iv_idx))
             bytesleft -= len(enc_chunk)
 
             mac.update(enc_chunk)
@@ -125,7 +125,8 @@ class FrameReader:
                     frame_length = int.from_bytes(self.get_framelength(frame_length_b), byteorder='big')
 
                 frame = BackupFrame()
-                frame.ParseFromString(self.read_frame(frame_length - 10, (-1 if self.backup_version == 0 else frame_length_b), False))
+                frame.ParseFromString(self.read_frame(
+                    frame_length - 10, (-1 if self.backup_version == 0 else frame_length_b), False))
 
                 # Read Attachment
                 attachment = None
