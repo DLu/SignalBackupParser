@@ -27,6 +27,10 @@ class FrameReader:
         header_frame = self.read(header_length)
         frame = BackupFrame()
         frame.ParseFromString(header_frame)
+        if hasattr(frame.header, 'version'):
+            self.backup_version = frame.header.version
+        else:
+            self.backup_version = 0
 
         # Backup Key
         b_password = password.encode()
@@ -51,34 +55,43 @@ class FrameReader:
         self.bytes_read += length
         return self.file.read(length)
 
-    def read_frame(self, length, with_iv=False):
+    def update_iv(self):
         val = int.to_bytes(self.counter, length=16, byteorder='little')
         self.iv[3] = val[0]
         self.iv[2] = val[1]
         self.iv[1] = val[2]
         self.iv[0] = val[3]
+        return self.iv
+
+    def xor_cipher(self, encoded_chunk, enc_iv, start=0):
+        return strxor.strxor(encoded_chunk, self.aes_cipher.encrypt(enc_iv)[start:start + len(encoded_chunk)])
+
+    def read_frame(self, length, with_iv=False, added_mac_factor=None):
+        enc_iv = self.update_iv()
         self.counter += 1
         mac = hmac.new(self.mac_key, digestmod=hashlib.sha256)
-        enc_iv = self.iv
         if with_iv:
             mac.update(self.iv)
+
+        if added_mac_factor is not None:
+            mac.update(added_mac_factor)
+            enc_iv_idx = len(added_mac_factor)
+        else:
+            enc_iv_idx = 0
+
         ofile = io.BytesIO()
 
-        def get_chunk():
-            # Read as many 16 byte chunks as possible
-            for i in range(int(length / 16)):
-                yield self.read(16)
-            # Read remainder
-            yield self.read(length % 16)
+        bytesleft = length
 
-        for enc_chunk in get_chunk():
+        while bytesleft != 0:
+            enc_chunk = self.read(min(bytesleft, 16 - enc_iv_idx))
+            bytesleft -= len(enc_chunk)
+
             mac.update(enc_chunk)
-            output = strxor.strxor(
-                enc_chunk,
-                self.aes_cipher.encrypt(enc_iv)[:len(enc_chunk)]
-            )
+            output = self.xor_cipher(enc_chunk, enc_iv, start=enc_iv_idx)
             ctr = int.from_bytes(enc_iv, byteorder='big') + 1
             enc_iv = int.to_bytes(ctr, length=16, byteorder='big')
+            enc_iv_idx = 0
             ofile.write(output)
 
         our_mac = mac.digest()
@@ -92,9 +105,19 @@ class FrameReader:
         with click.progressbar(length=self.bytes_total) as bar:
             while self.bytes_read < self.bytes_total:
                 # Read Frame
-                frame_length = int.from_bytes(self.read(4), byteorder='big')
+                frame_length_b = self.read(4)
+
+                if self.backup_version == 0:
+                    added_mac_factor = None
+                else:
+                    added_mac_factor = frame_length_b
+                    enc_iv = self.update_iv()
+                    frame_length_b = self.xor_cipher(frame_length_b, enc_iv)
+
+                frame_length = int.from_bytes(frame_length_b, byteorder='big')
+
                 frame = BackupFrame()
-                frame.ParseFromString(self.read_frame(frame_length - 10))
+                frame.ParseFromString(self.read_frame(frame_length - 10, added_mac_factor=added_mac_factor))
 
                 # Read Attachment
                 attachment = None
