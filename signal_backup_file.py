@@ -78,7 +78,7 @@ class FrameReader:
             length = int.from_bytes(frame_length_b, byteorder='big') - 10
 
         if with_iv:
-           mac.update(self.iv)
+            mac.update(self.iv)
 
         enc_frame = self.read(length)
 
