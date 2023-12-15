@@ -49,7 +49,6 @@ class FrameReader:
         self.mac_key = derivative[32:]
         self.iv = bytearray(frame.header.iv)
         self.counter = int.from_bytes(self.iv[:4], byteorder='big')
-        self.aes_cipher = AES.new(self.cipher_key, AES.MODE_ECB)
 
     def read(self, length):
         self.bytes_read += length
@@ -63,61 +62,42 @@ class FrameReader:
         self.iv[0] = val[3]
         return self.iv
 
-    def xor_cipher(self, encoded_chunk, enc_iv, start=0):
-        return strxor.strxor(encoded_chunk, self.aes_cipher.encrypt(enc_iv)[start:start + len(encoded_chunk)])
-
-    def read_frame(self, length, with_iv=False, added_mac_factor=None):
+    def read_frame(self, length=None, with_iv=False):
         enc_iv = self.update_iv()
         self.counter += 1
+
         mac = hmac.new(self.mac_key, digestmod=hashlib.sha256)
+        decryptor = AES.new(self.cipher_key, AES.MODE_CTR, nonce=b'', initial_value=enc_iv)
+
+        # get frame length if not provided
+        if length is None:
+            frame_length_b = self.read(4)
+            if self.backup_version > 0:
+                mac.update(frame_length_b)
+                frame_length_b = decryptor.decrypt(frame_length_b)
+            length = int.from_bytes(frame_length_b, byteorder='big') - 10
+
         if with_iv:
-            mac.update(self.iv)
+           mac.update(self.iv)
 
-        if added_mac_factor is not None:
-            mac.update(added_mac_factor)
-            enc_iv_idx = len(added_mac_factor)
-        else:
-            enc_iv_idx = 0
+        enc_frame = self.read(length)
 
-        ofile = io.BytesIO()
-
-        bytesleft = length
-
-        while bytesleft != 0:
-            enc_chunk = self.read(min(bytesleft, 16 - enc_iv_idx))
-            bytesleft -= len(enc_chunk)
-
-            mac.update(enc_chunk)
-            output = self.xor_cipher(enc_chunk, enc_iv, start=enc_iv_idx)
-            ctr = int.from_bytes(enc_iv, byteorder='big') + 1
-            enc_iv = int.to_bytes(ctr, length=16, byteorder='big')
-            enc_iv_idx = 0
-            ofile.write(output)
+        mac.update(enc_frame)
+        dec_frame = decryptor.decrypt(enc_frame)
 
         our_mac = mac.digest()
-        our_mac = our_mac[:10]  # trim to 1st 10 bytes
         their_asset_mac = self.read(10)
-        assert hmac.compare_digest(our_mac, their_asset_mac)
-        return ofile.getvalue()
+        assert hmac.compare_digest(our_mac[:10], their_asset_mac)
+        return dec_frame
 
     def __iter__(self):
         last_bytes = 0
         with click.progressbar(length=self.bytes_total) as bar:
             while self.bytes_read < self.bytes_total:
+
                 # Read Frame
-                frame_length_b = self.read(4)
-
-                if self.backup_version == 0:
-                    added_mac_factor = None
-                else:
-                    added_mac_factor = frame_length_b
-                    enc_iv = self.update_iv()
-                    frame_length_b = self.xor_cipher(frame_length_b, enc_iv)
-
-                frame_length = int.from_bytes(frame_length_b, byteorder='big')
-
                 frame = BackupFrame()
-                frame.ParseFromString(self.read_frame(frame_length - 10, added_mac_factor=added_mac_factor))
+                frame.ParseFromString(self.read_frame())
 
                 # Read Attachment
                 attachment = None
