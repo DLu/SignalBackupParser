@@ -10,7 +10,6 @@ from Reactions_pb2 import ReactionList
 
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA512
-from Crypto.Util import strxor
 
 from axolotl.kdf.hkdfv3 import HKDFv3
 
