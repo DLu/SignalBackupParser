@@ -14,13 +14,13 @@ repos:
   - id: check-ast
   - id: double-quote-string-fixer
   - id: requirements-txt-fixer
-  rev: v4.4.0
+  rev: v4.5.0
 - repo: https://github.com/codespell-project/codespell
   hooks:
   - id: codespell
     args:
     - --write-changes
-  rev: v2.2.5
+  rev: v2.2.6
 - repo: https://github.com/hhatto/autopep8
   hooks:
   - id: autopep8
